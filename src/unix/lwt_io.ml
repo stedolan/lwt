@@ -1621,7 +1621,7 @@ let establish_server_generic
       in
 
       connection_handler_callback
-        client_address (input_channel, output_channel);
+        client_address client_socket (input_channel, output_channel);
 
       accept_loop ()
 
@@ -1659,8 +1659,8 @@ let establish_server_generic
 
   server, server_has_started
 
-let establish_server_with_client_address
-    ?fd ?buffer_size ?backlog ?(no_close = false) sockaddr f =
+let establish_server_with_client_socket
+    ?server_fd ?buffer_size ?backlog ?(no_close = false) sockaddr f =
   let best_effort_close channel =
     (* First, check whether the channel is closed. f may have already tried to
        close the channel, received an exception, and handled it somehow. If so,
@@ -1678,13 +1678,13 @@ let establish_server_with_client_address
            Lwt.return_unit)
   in
 
-  let handler addr ((input_channel, output_channel) as channels) =
+  let handler addr socket ((input_channel, output_channel) as channels) =
     Lwt.async (fun () ->
       (* Not using Lwt.finalize here, to make sure that exceptions from [f]
          reach !Lwt.async_exception_hook before exceptions from closing the
          channels. *)
       Lwt.catch
-        (fun () -> f addr channels)
+        (fun () -> f addr socket channels)
         (fun exn ->
            !Lwt.async_exception_hook exn;
            Lwt.return_unit)
@@ -1698,10 +1698,16 @@ let establish_server_with_client_address
 
   let server, started =
     establish_server_generic
-      Lwt_unix.bind ?fd ?buffer_size ?backlog sockaddr handler
+      Lwt_unix.bind ?fd:server_fd ?buffer_size ?backlog sockaddr handler
   in
   started >>= fun () ->
   Lwt.return server
+
+let establish_server_with_client_address
+    ?fd ?buffer_size ?backlog ?no_close sockaddr handler =
+  let handler addr _socket c = handler addr c in
+  establish_server_with_client_socket
+    ?server_fd:fd ?buffer_size ?backlog ?no_close sockaddr handler
 
 let establish_server ?fd ?buffer_size ?backlog ?no_close sockaddr f =
   let f _addr c = f c in
@@ -1715,7 +1721,7 @@ let establish_server_deprecated ?fd ?buffer_size ?backlog sockaddr f =
   let blocking_bind fd addr =
     Lwt.return (Lwt_unix.Versioned.bind_1 fd addr) [@ocaml.warning "-3"]
   in
-  let f _addr c = f c in
+  let f _addr _socket c = f c in
 
   let server, server_started =
     establish_server_generic blocking_bind ?fd ?buffer_size ?backlog sockaddr f
