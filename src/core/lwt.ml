@@ -767,6 +767,7 @@ sig
   val new_key : unit -> _ key
   val get : 'v key -> 'v option
   val with_value : 'v key -> 'v option -> (unit -> 'b) -> 'b
+  val next_key_id : int ref
 
   (* Internal interface *)
   val current_storage : storage ref
@@ -2461,6 +2462,11 @@ include Sequential_composition
 
 
 
+(* The PRNG state is initialized with a constant to make non-IO-based programs
+   deterministic. *)
+(* Maintainer's note: is this necessary? *)
+let prng = ref (Random.State.make [||])
+
 module Concurrent_composition :
 sig
   val async : (unit -> _ t) -> unit
@@ -2648,11 +2654,6 @@ struct
         if n <= 0 then (List.iter cancel ps; p)
         else nth_resolved_and_cancel_pending ps (n - 1)
 
-  (* The PRNG state is initialized with a constant to make non-IO-based programs
-     deterministic. *)
-  (* Maintainer's note: is this necessary? *)
-  let prng = lazy (Random.State.make [||])
-
   let choose ps =
     match count_resolved_promises_in ps with
     | 0 ->
@@ -2673,7 +2674,7 @@ struct
       nth_resolved ps 0
 
     | n ->
-      nth_resolved ps (Random.State.int (Lazy.force prng) n)
+      nth_resolved ps (Random.State.int !prng n)
 
   let pick ps =
     match count_resolved_promises_in ps with
@@ -2697,7 +2698,7 @@ struct
 
     | n ->
       nth_resolved_and_cancel_pending ps
-        (Random.State.int (Lazy.force prng) n)
+        (Random.State.int !prng n)
 
 
 
@@ -3096,3 +3097,39 @@ struct
   let make_error exn = Result.Error exn
 end
 include Lwt_result_type
+
+
+
+
+
+let yielded = Lwt_sequence.create ()
+
+let yield () = add_task_r yielded
+
+
+let reset () =
+  (* clear yield *)
+  assert (Lwt_sequence.is_empty yielded);
+  (* Lwt_sequence.transfer_r yielded (Lwt_sequence.create ()); *)
+  assert (Storage_map.is_empty !Sequence_associated_storage.current_storage);
+  assert (!Sequence_associated_storage.next_key_id = 0);
+  prng := Random.State.make [||]
+
+
+let rec run t =
+  (* Wakeup paused threads now. *)
+  wakeup_paused ();
+  match poll t with
+  | Some x ->
+    reset ();
+    x
+  | None ->
+    (* Wakeup paused threads again. *)
+    wakeup_paused ();
+    (* Wakeup yielded threads now. *)
+    if not (Lwt_sequence.is_empty yielded) then begin
+      let tmp = Lwt_sequence.create () in
+      Lwt_sequence.transfer_r yielded tmp;
+      Lwt_sequence.iter_l (fun wakener -> wakeup wakener ()) tmp
+    end;
+    run t
